@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: postgresql://iq:iq_ci_password@localhost:5432/iq_test?schema=public
+  TEST_DATABASE_URL: postgresql://iq:iq_ci_password@localhost:5432/iq_test_integration?schema=public
+  SESSION_SECRET: ci-session-secret-value-at-least-32-characters-long
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: iq
+          POSTGRES_PASSWORD: iq_ci_password
+          POSTGRES_DB: iq_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U iq -d iq_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        # Prisma 7 no longer runs generate implicitly, and the client lands in src/, so nothing
+        # type-checks until this has run.
+        run: npx prisma generate
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Validate the question bank
+        # The substantive quality gate: regenerates the whole bank and fails the build if any
+        # generator emits an ambiguous item, a duplicate option, an unanswerable figure, or a
+        # duplicate question.
+        run: npm run bank:validate
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Create the integration database
+        run: |
+          PGPASSWORD=iq_ci_password psql -h localhost -U iq -d postgres \
+            -c "CREATE DATABASE iq_test_integration OWNER iq;"
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - name: Prepare the integration database
+        run: npm run test:db:setup
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: Seed the development database
+        run: npm run db:seed
+
+      - name: Production build
+        run: npm run build
+
+      - name: End-to-end smoke test
+        # Exercises the deployed surface — cookies, headers, routing — which the Vitest suites
+        # cannot reach because they call services directly.
+        run: |
+          npm run start &
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:3000/api/health >/dev/null && break
+            sleep 2
+          done
+          npm run smoke
+        env:
+          BASE_URL: http://localhost:3000
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: cognitive-reasoning-assessment:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check the image starts and reports its health
+        run: |
+          docker network create ci-net
+          docker run -d --name ci-db --network ci-net \
+            -e POSTGRES_USER=iq -e POSTGRES_PASSWORD=iq_ci_password -e POSTGRES_DB=iq_test \
+            postgres:16-alpine
+          for i in $(seq 1 30); do
+            docker exec ci-db pg_isready -U iq -d iq_test && break
+            sleep 2
+          done
+
+          DB_URL="postgresql://iq:iq_ci_password@ci-db:5432/iq_test?schema=public"
+
+          # Migrate and seed using the builder stage, which still has the CLI available.
+          docker build --target builder -t cra-builder:ci .
+          docker run --rm --network ci-net -e DATABASE_URL="$DB_URL" -e SEED_COUNT=200 \
+            cra-builder:ci sh -c "npx prisma migrate deploy && npx tsx prisma/seed.ts"
+
+          docker run -d --name ci-app --network ci-net -p 3000:3000 \
+            -e DATABASE_URL="$DB_URL" \
+            -e SESSION_SECRET="ci-session-secret-value-at-least-32-characters-long" \
+            cognitive-reasoning-assessment:ci
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/api/health; then
+              echo "\nApplication is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Application did not become healthy:"
+          docker logs ci-app
+          exit 1

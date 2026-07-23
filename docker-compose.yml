@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: iq_test_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: iq
+      POSTGRES_PASSWORD: iq_dev_password
+      POSTGRES_DB: iq_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app's migrate/seed steps run as soon as this reports healthy,
+      # so check the actual database, not just that the port is open.
+      test: ["CMD-SHELL", "pg_isready -U iq -d iq_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:

@@ -1,0 +1,400 @@
+// Cognitive Reasoning Assessment — data model
+//
+// Prisma 7 notes:
+//   * provider is `prisma-client` (not `prisma-client-js`)
+//   * `output` is mandatory — Prisma no longer generates into node_modules
+//   * the runtime client is constructed with a driver adapter (see src/server/db.ts)
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+// Prisma 7: the connection URL lives in prisma.config.ts, not here. The runtime client is
+// constructed with a driver adapter (@prisma/adapter-pg) — see src/server/db.ts.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum QuestionStatus {
+  DRAFT
+  PUBLISHED
+  RETIRED
+}
+
+enum TestMode {
+  TIMED
+  UNTIMED
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  ABANDONED
+  EXPIRED
+}
+
+enum ConfidenceLevel {
+  LOW
+  MODERATE
+  HIGH
+}
+
+enum AbilityBand {
+  BELOW_AVERAGE
+  AVERAGE
+  ABOVE_AVERAGE
+}
+
+/// Collected for bias monitoring and reporting only. It never influences a score — two identical
+/// answer sheets always produce the same result regardless of gender.
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+/// Descriptive context only; does not influence scoring.
+enum EducationLevel {
+  PRIMARY
+  SECONDARY
+  VOCATIONAL
+  BACHELORS
+  MASTERS
+  DOCTORATE
+  PREFER_NOT_TO_SAY
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  displayName  String?
+  passwordHash String
+  role         Role      @default(USER)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastLoginAt  DateTime?
+
+  // --- profile demographics ---------------------------------------------
+  // Birth year rather than age: an age stored as a number silently goes stale, whereas a birth
+  // year stays correct and lets each attempt record the age the person actually was that day.
+  // Year only, not full date of birth — it is all the norming needs, and collecting less personal
+  // data than necessary is the right default.
+  birthYear      Int?
+  gender         Gender?
+  educationLevel EducationLevel?
+
+  // Signed-in-only. Used to show a reference comparison against published country/occupation
+  // figures on the dashboard. Neither affects a score — they never touch the scoring engine.
+  // Stored as loose strings (ISO country code, profession key) validated in the application
+  // rather than as DB enums, so the country and profession catalogues can grow without a
+  // migration for every addition.
+  nationality String?
+  profession  String?
+
+  /// Preferred interface + test language (a Locale code, e.g. "en" / "az"). Guests keep the same
+  /// preference in a cookie; for a signed-in user this makes it follow them across devices.
+  language String?
+
+  sessions Session[]
+  attempts Attempt[]
+
+  @@map("users")
+}
+
+/// Opaque server-side sessions rather than stateless JWTs: the spec requires preventing
+/// multiple simultaneous sessions, which is impossible to enforce with an unrevokable token.
+/// Only the SHA-256 hash of the session token is stored, so a database leak does not hand
+/// an attacker usable sessions.
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+  lastSeenAt DateTime @default(now())
+  userAgent  String?
+  ipHash     String?
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Question bank
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          String  @id @default(cuid())
+  slug        String  @unique
+  name        String
+  description String
+  /// One of the six domains the blueprint guarantees representation for.
+  isCore      Boolean @default(false)
+  sortOrder   Int     @default(0)
+
+  questions      Question[]
+  categoryScores CategoryScore[]
+
+  @@map("categories")
+}
+
+model Question {
+  id         String   @id @default(cuid())
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  /// Designed difficulty, 1 (easiest) .. 10 (hardest). Drives blueprint banding.
+  difficulty Int
+
+  /// 3PL item parameters. Currently derived from `difficulty` (see core/psychometrics/irt.ts);
+  /// these columns exist so real calibration can overwrite them once ItemStatistic has data.
+  irtA Float @default(1.0)
+  irtB Float
+  irtC Float @default(0.25)
+
+  /// English text (the fallback for every locale). Kept as a plain column so the English path is
+  /// unchanged and localization is purely additive.
+  stem        String
+  /// Localized stems as a { locale: string } map, including English. Delivery reads
+  /// stemI18n[locale] and falls back to `stem`. Null on legacy rows.
+  stemI18n    Json?
+  /// Inline SVG markup for visual items — generated from geometry, so there are no image files
+  /// to host and the figure adapts to light/dark themes via currentColor. Language-independent.
+  svg         String?
+  imageUrl    String?
+  explanation String
+  explanationI18n Json?
+  /// Locales this item can be delivered in. Language-parallel items (figural, numeric, spatial,
+  /// logic) support every locale; language-specific items (e.g. verbal analogies) list only their
+  /// own. The sampler filters the pool by the requested locale against this.
+  locales     String[] @default(["en"])
+
+  estimatedSeconds Int    @default(60)
+  /// Which generator produced this item, plus its seed — makes any item reproducible.
+  generatorId      String
+  seed             String
+
+  /// Canonical hash of the item's semantic content. Unique, so the bank cannot contain duplicates
+  /// even across separate seed runs.
+  signature String         @unique
+  status    QuestionStatus @default(PUBLISHED)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  choices      Choice[]
+  attemptItems AttemptItem[]
+  statistic    ItemStatistic?
+
+  /// The exact index the blueprint sampler rides.
+  @@index([status, difficulty, categoryId])
+  @@index([categoryId])
+  @@index([generatorId])
+  @@map("questions")
+}
+
+model Choice {
+  id         String   @id @default(cuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  /// Canonical position in the bank. Delivery order is per-attempt (AttemptItem.choiceOrder).
+  ordinal   Int
+  text      String?
+  /// Localized option text as a { locale: string } map (null for figure-only options). Delivery
+  /// reads textI18n[locale] and falls back to `text`.
+  textI18n  Json?
+  svg       String?
+  isCorrect Boolean @default(false)
+  /// Why this distractor is tempting — surfaced in the post-test review.
+  rationale String?
+  rationaleI18n Json?
+
+  responses Response[]
+
+  @@unique([questionId, ordinal])
+  @@index([questionId])
+  @@map("choices")
+}
+
+/// Accumulates real response data so the bank can eventually be calibrated empirically instead of
+/// from designed difficulty. Nothing reads it for scoring in Phase 1 — it is written on submit.
+model ItemStatistic {
+  questionId String   @id
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  exposures    Int   @default(0)
+  correctCount Int   @default(0)
+  /// Classical difficulty: proportion correct.
+  pValue       Float?
+  /// Discrimination: point-biserial correlation with total score.
+  rPointBiserial Float?
+  meanResponseMs Float?
+  /// Running sums kept so statistics update incrementally without rescanning every response.
+  sumResponseMs     Float @default(0)
+  sumTotalScore     Float @default(0)
+  sumTotalScoreSq   Float @default(0)
+  sumCorrectTotal   Float @default(0)
+
+  lastCalibratedAt DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@map("item_statistics")
+}
+
+// ---------------------------------------------------------------------------
+// Test delivery & results
+// ---------------------------------------------------------------------------
+
+model Attempt {
+  id String @id @default(cuid())
+
+  /// Exactly one of userId / guestKey is set. Guests can take a full test without registering;
+  /// `claim` moves the attempt onto a User at signup.
+  userId   String?
+  user     User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guestKey String?
+
+  mode            TestMode
+  status          AttemptStatus @default(IN_PROGRESS)
+  /// Language the test was assembled and delivered in. Fixed at creation so a mid-test language
+  /// switch cannot scramble an in-progress attempt.
+  locale          String        @default("en")
+  /// Null for untimed attempts.
+  durationSeconds Int?
+  /// Seed used to assemble this attempt — makes the whole test reproducible for audit.
+  seed            String
+
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+  expiresAt   DateTime?
+
+  // --- demographics, snapshotted at the moment of the attempt --------------
+  // Copied from the user's profile (or supplied by a guest) rather than joined at read time:
+  // people age, edit their profile, and delete their account, but a completed assessment must
+  // stay reproducible exactly as it was scored.
+  ageYears       Int?
+  gender         Gender?
+  educationLevel EducationLevel?
+  // Snapshotted from the profile at attempt time, like the other demographics, so a later profile
+  // edit cannot retroactively change which country/profession an old attempt was compared against.
+  // Always null for guests — the country/profession feature is signed-in only.
+  nationality    String?
+  profession     String?
+
+  // --- scoring output (null until submitted) ---
+  /// Ability estimate as measured, before any age referencing.
+  theta       Float?
+  /// Ability after referencing against the person's age group. Equals `theta` when age is unknown.
+  thetaAdjusted Float?
+  sem         Float?
+  /// Reported score. Derived from `thetaAdjusted`.
+  iqScore     Int?
+  /// Score before age referencing, kept so the raw measurement is always recoverable.
+  iqUnadjusted Int?
+  iqLower     Int?
+  iqUpper     Int?
+  percentile  Float?
+  confidence  ConfidenceLevel?
+  reliability Float?
+  correctCount Int?
+  totalCount   Int?
+
+  /// Which norm table produced the age reference, e.g. "modelled-v1" or "empirical-2026-08".
+  /// Null when no age adjustment was applied.
+  normSource String?
+
+  /// Effort/validity signals. rapidGuessing downgrades reported confidence.
+  focusLossCount Int     @default(0)
+  rapidGuessing  Boolean @default(false)
+
+  items          AttemptItem[]
+  categoryScores CategoryScore[]
+
+  @@index([userId, submittedAt])
+  @@index([guestKey])
+  @@index([status])
+  @@map("attempts")
+}
+
+/// One delivered question within an attempt, including the per-attempt shuffle.
+model AttemptItem {
+  id        String  @id @default(cuid())
+  attemptId String
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  /// 0-based position in the delivered test.
+  position Int
+  /// Choice ordinals in the order shown to this user. Stored server-side so a shuffled answer
+  /// still grades correctly — the client never needs to know the canonical order.
+  choiceOrder Int[]
+
+  response Response?
+
+  @@unique([attemptId, questionId])
+  @@unique([attemptId, position])
+  @@index([questionId])
+  @@map("attempt_items")
+}
+
+model Response {
+  id            String      @id @default(cuid())
+  attemptItemId String      @unique
+  attemptItem   AttemptItem @relation(fields: [attemptItemId], references: [id], onDelete: Cascade)
+
+  /// Null means seen but not answered.
+  selectedChoiceId String?
+  selectedChoice   Choice? @relation(fields: [selectedChoiceId], references: [id], onDelete: SetNull)
+
+  isCorrect  Boolean @default(false)
+  /// Time spent on this question, milliseconds. Feeds the rapid-guessing detector.
+  responseMs Int     @default(0)
+  flagged    Boolean @default(false)
+
+  answeredAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([selectedChoiceId])
+  @@map("responses")
+}
+
+/// Per-category ability estimate for one attempt. Deliberately stored as a band rather than a
+/// per-category IQ: 2-5 items cannot support a point score, and presenting one would be dishonest.
+model CategoryScore {
+  id        String  @id @default(cuid())
+  attemptId String
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  theta        Float
+  sem          Float
+  band         AbilityBand
+  correctCount Int
+  totalCount   Int
+  meanResponseMs Float
+
+  @@unique([attemptId, categoryId])
+  @@map("category_scores")
+}

@@ -1,0 +1,55 @@
+# Full stack: database + application, for a self-hosted deployment.
+#   docker compose -f docker-compose.prod.yml up --build
+#
+# For Vercel + Neon/Supabase instead, only DATABASE_URL and SESSION_SECRET are needed; the
+# `migrate` service below is the equivalent of a release command.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-iq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-iq_test}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iq} -d ${POSTGRES_DB:-iq_test}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Runs migrations and seeds the bank, then exits. The app waits for it to complete, so a fresh
+  # deployment cannot serve traffic against an empty or out-of-date schema.
+  migrate:
+    build:
+      context: .
+      target: builder
+    command: sh -c "npx prisma migrate deploy && npx tsx prisma/seed.ts"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-iq}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-iq_test}?schema=public
+      SEED_COUNT: ${SEED_COUNT:-600}
+      SEED_RANDOM_SEED: ${SEED_RANDOM_SEED:-20260722}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-iq}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-iq_test}?schema=public
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      TIMED_MODE_MINUTES: ${TIMED_MODE_MINUTES:-25}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+/* next-themes is configured with attribute="class", so dark styles key off a .dark ancestor. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Design tokens.
+ *
+ * A restrained, professional palette: a slate neutral ramp with a single indigo accent, plus
+ * semantic colours reserved for result feedback. Every foreground/background pairing used for
+ * text meets WCAG 2.2 AA contrast (>= 4.5:1) in both themes.
+ */
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --color-surface: oklch(99% 0.002 250);
+  --color-surface-raised: oklch(100% 0 0);
+  --color-surface-sunken: oklch(96.5% 0.004 250);
+  --color-border: oklch(90% 0.006 250);
+  --color-border-strong: oklch(82% 0.01 250);
+
+  --color-content: oklch(23% 0.02 255);
+  --color-content-muted: oklch(48% 0.015 255);
+  --color-content-subtle: oklch(60% 0.012 255);
+
+  /*
+   * Series and status colours below were validated with the dataviz skill's checker
+   * (scripts/validate_palette.js) against these exact surfaces, not chosen by eye.
+   * The accent doubles as the single chart-series hue and passes every check in both modes.
+   */
+  --color-accent: oklch(52% 0.19 275); /* #4e56d3 — all checks pass on light surface */
+  --color-accent-hover: oklch(46% 0.19 275);
+  --color-accent-soft: oklch(95% 0.03 275);
+  --color-accent-content: oklch(99% 0 0);
+
+  /*
+   * Status hues. Caution sits at hue 90 rather than 75: against the positive green and the
+   * negative red, hue 75 measured a normal-vision ΔE of 14.0 — below the 15 floor, meaning even
+   * full-colour readers struggled to separate them. Hue 90 lifts that to 15.6.
+   *
+   * Under protanopia amber and green still measure ΔE ~5, and no hue choice fixes that: it is
+   * inherent to a good/warning/bad triad. The mitigation is mandatory and applied throughout —
+   * every status colour ships with an icon AND a text label, so colour never carries meaning
+   * alone. See the `Verdict` component.
+   */
+  --color-positive: oklch(52% 0.14 155);
+  --color-positive-soft: oklch(95% 0.04 155);
+  --color-caution: oklch(60% 0.135 90);
+  --color-caution-soft: oklch(96% 0.05 90);
+  --color-negative: oklch(52% 0.19 25);
+  --color-negative-soft: oklch(95% 0.04 25);
+
+  --radius-card: 0.875rem;
+}
+
+/*
+ * Dark theme. Not an inversion: surfaces stay slightly blue-shifted and the accent is lightened
+ * so it keeps contrast against a dark background rather than vibrating against it.
+ */
+.dark {
+  --color-surface: oklch(19% 0.015 260);
+  --color-surface-raised: oklch(23% 0.017 260);
+  --color-surface-sunken: oklch(15.5% 0.014 260);
+  --color-border: oklch(31% 0.018 260);
+  --color-border-strong: oklch(42% 0.02 260);
+
+  --color-content: oklch(96% 0.005 260);
+  --color-content-muted: oklch(75% 0.012 260);
+  --color-content-subtle: oklch(62% 0.014 260);
+
+  /*
+   * Dark steps are SELECTED for the dark surface, not flipped from light. The validator enforces
+   * OKLCH L within 0.48–0.67 in dark mode; the original values (L 0.70–0.78) all sat above it,
+   * which reads as glare against a dark background. These are re-stepped into the band and
+   * re-validated at >= 3:1 contrast on the dark surface.
+   */
+  --color-accent: oklch(66% 0.155 275); /* #7887f0 — all checks pass on dark surface */
+  --color-accent-hover: oklch(72% 0.15 275);
+  --color-accent-soft: oklch(30% 0.06 275);
+  --color-accent-content: oklch(17% 0.02 275);
+
+  --color-positive: oklch(65% 0.145 155);
+  --color-positive-soft: oklch(28% 0.05 155);
+  --color-caution: oklch(66.5% 0.145 90);
+  --color-caution-soft: oklch(30% 0.05 90);
+  --color-negative: oklch(62% 0.175 25);
+  --color-negative-soft: oklch(30% 0.06 25);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-surface);
+    color: var(--color-content);
+    font-family: var(--font-sans);
+    /* Prevent the horizontal scroll that wide question figures would otherwise cause. */
+    overflow-x: hidden;
+  }
+
+  /* A single, consistent, high-visibility focus ring — required for keyboard operation. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /*
+   * Respect prefers-reduced-motion. This is a WCAG 2.2 AA obligation, not a nicety: the test
+   * runner animates on every question transition, which can be genuinely disabling for users
+   * with vestibular disorders.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Question figures are generated SVG that inherits the current text colour. */
+  .iq-figure {
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    color: var(--color-content);
+  }
+}

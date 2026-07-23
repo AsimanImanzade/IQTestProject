@@ -1,0 +1,26 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Prisma 7 generates the client into the source tree (no longer node_modules)
+src/generated/
+
+.env
+.env.local
+.env*.local
+!.env.example
+
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+next-env.d.ts
+tsconfig.tsbuildinfo

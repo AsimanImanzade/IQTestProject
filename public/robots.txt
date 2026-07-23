@@ -1,0 +1,10 @@
+# Test, result and dashboard pages are per-person and carry no value to a crawler.
+# They are also marked noindex in page metadata; this is belt and braces.
+User-agent: *
+Allow: /$
+Allow: /login
+Allow: /register
+Disallow: /test/
+Disallow: /results/
+Disallow: /dashboard
+Disallow: /api/
